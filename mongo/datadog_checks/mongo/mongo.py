@@ -1,10 +1,11 @@
-# (C) Datadog, Inc. 2018
+# (C) Datadog, Inc. 2018-2019
 # All rights reserved
 # Licensed under a 3-clause BSD style license (see LICENSE)
 from __future__ import division
 
 import re
 import time
+from copy import deepcopy
 from distutils.version import LooseVersion
 
 import pymongo
@@ -20,6 +21,8 @@ if PY3:
 DEFAULT_TIMEOUT = 30
 GAUGE = AgentCheck.gauge
 RATE = AgentCheck.rate
+ALLOWED_CUSTOM_METRICS_TYPES = ['gauge', 'rate']
+ALLOWED_CUSTOM_QUERIES_COMMANDS = ['aggregate', 'count', 'find']
 
 
 class MongoDb(AgentCheck):
@@ -650,6 +653,92 @@ class MongoDb(AgentCheck):
             except Exception as e:
                 self.log.error("Could not fetch indexes stats for collection %s: %s", coll_name, e)
 
+    @staticmethod
+    def _format_custom_query(raw_query, tags):
+        """Takes a custom query from the config file, validates it and return a well formatted dictionary."""
+        raw_query = deepcopy(raw_query)
+        mongo_query = raw_query['query']
+        field = raw_query.get('field')
+        metric_name = raw_query['metric']
+        total_tags = tags + raw_query.get('tags', [])
+        metric_type = raw_query.get('type', 'gauge').lower()
+        if metric_type not in ALLOWED_CUSTOM_METRICS_TYPES:
+            raise Exception("Metric type {} is not one of {}.".format(metric_type, ALLOWED_CUSTOM_METRICS_TYPES))
+
+        # Extract the command (find, count or aggregate) from the query. Even though mongo and pymongo are supposed
+        # to work with the query as a single document, pymongo expects the command to be the `first` element of the
+        # query dict.
+        # Because python dicts are not ordered, the command is extracted to be later run as the first argument
+        # of pymongo `runcommand`
+        for command in ALLOWED_CUSTOM_QUERIES_COMMANDS:
+            if command in mongo_query:
+                query_command = command
+                collection = mongo_query[command]
+                del mongo_query[command]
+                break
+        else:
+            raise Exception("Custom query command must be of type {}".format(ALLOWED_CUSTOM_QUERIES_COMMANDS))
+
+        if query_command != 'count' and field is None:
+            raise Exception(
+                "You are running a {} command. You must specify a projection field for metric {}".format(
+                    query_command[0], metric_name
+                )
+            )
+
+        total_tags.append('collection:{}'.format(collection))
+        return {
+            'query_command': query_command,
+            'collection': collection,
+            'query_params': mongo_query,
+            'field': field,
+            'metric': metric_name,
+            'type': metric_type,
+            'tags': total_tags,
+        }
+
+    def _collect_custom_metric(self, db, formatted_query):
+        """Expects a well formatted custom query, will execute the mongo command and submit metrics."""
+        query_command = formatted_query['query_command']
+        collection_name = formatted_query['collection']
+        query_params = formatted_query['query_params']
+        field = formatted_query['field']
+        metric_name = formatted_query['metric']
+        tags = formatted_query['tags']
+        submit_method = self.gauge if formatted_query['type'] == 'gauge' else self.rate
+
+        try:
+            # This is where it is necessary to extract the command and its argument from the query to pass it as the
+            # first two params.
+            result = db.command(query_command, collection_name, **query_params)
+            if result['ok'] == 0:
+                raise pymongo.errors.PyMongoError(result['errmsg'])
+        except pymongo.errors.PyMongoError:
+            self.log.error("Failed to run custom query for metric {}".format(metric_name))
+            raise
+
+        if query_command == 'count':
+            submit_method(metric_name, result['n'], tags)
+        elif query_command == 'find':
+            try:
+                metric_value = float(result['cursor']['firstBatch'][0][field])
+                submit_method(metric_name, metric_value, tags)
+            except (KeyError, IndexError):
+                self.log.debug("No value found for custom metric {}".format(metric_name))
+        elif query_command == 'aggregate':
+            # Collect all elements from the aggregate query. Also replace `$_id` in tags with the aggregated `_id`
+            # field.
+            cursor = pymongo.command_cursor.CommandCursor(
+                pymongo.collection.Collection(db, collection_name), result['cursor'], None
+            )
+            for element in cursor:
+                try:
+                    metric_value = float(element[field])
+                    formatted_tags = [t.replace('$_id', element['_id']) for t in tags]
+                    submit_method(metric_name, metric_value, formatted_tags)
+                except (KeyError, ValueError):
+                    self.log.debug("Invalid value in field '{}' for custom metric {}".format(field, metric_name))
+
     def check(self, instance):
         """
         Returns a dictionary that looks a lot like what's sent back by
@@ -1043,3 +1132,12 @@ class MongoDb(AgentCheck):
         except Exception as e:
             self.log.warning(u"Failed to record `collection` metrics.")
             self.log.exception(e)
+
+        custom_queries = instance.get("queries", [])
+        custom_query_tags = tags + ["db:{}".format(db_name)]
+        for raw_query in custom_queries:
+            try:
+                formatted_query = self._format_custom_query(raw_query, custom_query_tags)
+                self._collect_custom_metric(db, formatted_query)
+            except Exception as e:
+                self.log.exception(e)

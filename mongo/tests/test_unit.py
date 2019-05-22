@@ -1,4 +1,4 @@
-# (C) Datadog, Inc. 2018
+# (C) Datadog, Inc. 2018-2019
 # All rights reserved
 # Licensed under a 3-clause BSD style license (see LICENSE)
 import logging
@@ -147,3 +147,47 @@ def test_server_uri_sanitization(check):
     for server, expected_clean_name in server_names:
         _, _, _, _, clean_name, _ = _parse_uri(server, sanitize_username=True)
         assert expected_clean_name == clean_name
+
+
+@pytest.mark.unit
+def test_custom_query_formatting(check):
+    def _format_custom_query(x):
+        return check._format_custom_query(x, [])
+
+    def get_dummy(query=None, metric='dd.metric.name', type_name='gauge', field=None):
+        if query is None:
+            query = {'count': 'collection'}
+        return {'query': query, 'metric': metric, 'type': type_name, 'field': field}
+
+    find_query = get_dummy(query={'find': 'collection', 'key': 'value'})
+    aggregate_query = get_dummy(query={'aggregate': 'collection', 'key': 'value'})
+    count_query = get_dummy(query={'count': 'collection', 'key': 'value'})
+    unsupported_query = get_dummy(query={'group': 'collection', 'key': 'value'})
+
+    query_to_gauge = get_dummy(type_name='gauge')
+    query_to_rate = get_dummy(type_name='rate')
+    query_to_count = get_dummy(type_name='count')
+
+    _format_custom_query(query_to_gauge)
+    _format_custom_query(query_to_rate)
+    with pytest.raises(Exception, match=r'Metric type .* is not one of .*'):
+        _format_custom_query(query_to_count)
+
+    _format_custom_query(count_query)
+    with pytest.raises(Exception, match=r'You are running a .* command. You must specify a projection field for .*'):
+        _format_custom_query(find_query)
+    with pytest.raises(Exception, match=r'You are running a .* command. You must specify a projection field for .*'):
+        _format_custom_query(aggregate_query)
+
+    find_query['field'] = 'field_name'
+    aggregate_query['field'] = 'field_name'
+    _format_custom_query(find_query)
+    _format_custom_query(aggregate_query)
+
+    with pytest.raises(Exception, match=r'Custom query command must be of type .*'):
+        _format_custom_query(unsupported_query)
+
+    expected_answer_keys = {'query_command', 'collection', 'query_params', 'field', 'metric', 'type', 'tags'}
+    answer = _format_custom_query(find_query)
+    for key in expected_answer_keys:
+        assert key in answer

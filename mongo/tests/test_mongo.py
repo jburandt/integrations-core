@@ -1,4 +1,4 @@
-# (C) Datadog, Inc. 2018
+# (C) Datadog, Inc. 2018-2019
 # All rights reserved
 # Licensed under a 3-clause BSD style license (see LICENSE)
 import pytest
@@ -127,3 +127,20 @@ def test_mongo_old_config_2(aggregator, check, instance):
         metric_name = metric.name
         if metric_name in METRIC_VAL_CHECKS_OLD:
             assert METRIC_VAL_CHECKS_OLD[metric_name](metric.value)
+
+
+@pytest.mark.usefixtures('dd_environment')
+def test_mongo_custom_queries(aggregator, check, instance_custom_queries):
+    # Run the check against our running server
+    check.check(instance_custom_queries)
+
+    aggregator.assert_metric("dd.custom.mongo.best", value=69, count=1, metric_type=aggregator.GAUGE)
+    aggregator.assert_metric("dd.custom.mongo.count", value=70, count=1, metric_type=aggregator.GAUGE)
+    aggregator.assert_metric("dd.custom.mongo.aggregate", value=375, count=1, metric_type=aggregator.RATE)
+    aggregator.assert_metric("dd.custom.mongo.aggregate", value=125, count=1, metric_type=aggregator.RATE)
+
+    aggregator.assert_metric_has_tag("dd.custom.mongo.best", 'collection:foo', count=1)
+    aggregator.assert_metric_has_tag("dd.custom.mongo.count", 'collection:foo', count=1)
+    aggregator.assert_metric_has_tag("dd.custom.mongo.aggregate", 'collection:orders', count=2)
+    aggregator.assert_metric_has_tag("dd.custom.mongo.aggregate", 'cust_id:abc1', count=1)
+    aggregator.assert_metric_has_tag("dd.custom.mongo.aggregate", 'cust_id:xyz1', count=1)

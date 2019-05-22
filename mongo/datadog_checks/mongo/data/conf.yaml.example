@@ -93,6 +93,31 @@ instances:
     #
     # collections_indexes_stats: false
 
+    ## @param queries - list of objects - optional
+    ## Define custom queries to collect custom metrics on your MongoDB database. You can run count, find and aggregate
+    ## commands. The format of query is a yaml version of what you can find on mongo docs
+    ## https://docs.mongodb.com/manual/reference/command/
+    ## For find and aggregate commands you need to specify a field from which the agent will read the metric value. This
+    ## is ignored with count commands. A find command will only submit the first value whereas an aggregate command will
+    ## submit all values. Also in aggregate command the `$_id` string in tags will be replaced by the value of the `_id`
+    ## column.
+    #
+    # queries:
+    #   - metric: <METRIC_NAME>
+    #     tags:
+    #       - <KEY>:<VALUE>
+    #       - <FIELD_NAME>:$_id
+    #     type: <gauge|rate>
+    #     query:
+    #       aggregate: <COLLECTION_NAME>
+    #       pipeline:
+    #         - $match:
+    #             <FIELD_NAME>: <FIELD_VALUE>
+    #         - $group:
+    #             _id: <FIELD_NAME>
+    #       cursor: {}
+    #     field: <FIELD_NAME>
+
 ## Log Section (Available for Agent >=6.0)
 ##
 ## type - mandatory - Type of log input source (tcp / udp / file / windows_event)
